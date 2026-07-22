@@ -20,6 +20,7 @@ import (
     "time"
 
     "golang.org/x/net/proxy"
+    "golang.org/x/net/publicsuffix"
 )
 
 type contextKey string
@@ -202,7 +203,7 @@ func (r *Rewriter) newContext(targetRaw string) (RewriteContext, bool) {
 
     return RewriteContext{
             BaseURL: target,
-            Host:    target.Host,
+            Host:    target.Hostname(),
     }, true
 }
 
@@ -504,7 +505,7 @@ func (r *Rewriter) normalizeAttributePath(
     if parsed.IsAbs() {
             if isHTTPURL(parsed) &&
                     sameRequestHost(
-                            parsed.Host,
+                            parsed.Hostname(),
                             rewriteContext.Host,
                     ) {
                     return value, true
@@ -515,7 +516,7 @@ func (r *Rewriter) normalizeAttributePath(
 
     if parsed.Host != "" {
             if sameRequestHost(
-                    parsed.Host,
+                    parsed.Hostname(),
                     rewriteContext.Host,
             ) {
                     return value, true
@@ -533,12 +534,26 @@ func (r *Rewriter) normalizeAttributePath(
     return value, false
 }
 
-func hasRequestHostPathPrefix(value string, host string) bool {
-    if len(value) <= len(host) || value[len(host)] != '/' {
+func hasRequestHostPathPrefix(
+    value string,
+    requestHostname string,
+) bool {
+    slashIndex := strings.IndexByte(value, '/')
+    if slashIndex <= 0 {
             return false
     }
 
-    return strings.EqualFold(value[:len(host)], host)
+    authority := value[:slashIndex]
+    parsed, err := url.Parse("//" + authority)
+    if err != nil || parsed.Host == "" || parsed.User != nil ||
+            parsed.Host != authority {
+            return false
+    }
+
+    return sameRequestHost(
+            parsed.Hostname(),
+            requestHostname,
+    )
 }
 
 func isHTTPURL(value *url.URL) bool {
@@ -547,8 +562,41 @@ func isHTTPURL(value *url.URL) bool {
             value.Host != ""
 }
 
+// sameRequestHost 将同一可注册主域下的根域名和各级子域名视为同域名。
+// IP 地址或无法提取可注册主域的主机名仅允许精确匹配。
 func sameRequestHost(left string, right string) bool {
-    return strings.EqualFold(left, right)
+    left = normalizeHostname(left)
+    right = normalizeHostname(right)
+
+    if left == "" || right == "" {
+            return false
+    }
+
+    if left == right {
+            return true
+    }
+
+    leftDomain, leftOK := registrableDomain(left)
+    rightDomain, rightOK := registrableDomain(right)
+
+    return leftOK && rightOK && leftDomain == rightDomain
+}
+
+func normalizeHostname(value string) string {
+    return strings.ToLower(strings.TrimSuffix(value, "."))
+}
+
+func registrableDomain(hostname string) (string, bool) {
+    if net.ParseIP(hostname) != nil {
+            return "", false
+    }
+
+    domain, err := publicsuffix.EffectiveTLDPlusOne(hostname)
+    if err != nil {
+            return "", false
+    }
+
+    return strings.ToLower(domain), true
 }
 
 func (r *Rewriter) rewriteURL(
@@ -574,14 +622,14 @@ func (r *Rewriter) rewriteURL(
     if reference.IsAbs() {
             if !isHTTPURL(reference) ||
                     !sameRequestHost(
-                            reference.Host,
+                            reference.Hostname(),
                             rewriteContext.Host,
                     ) {
                     return value, false
             }
     } else if reference.Host != "" &&
             !sameRequestHost(
-                    reference.Host,
+                    reference.Hostname(),
                     rewriteContext.Host,
             ) {
             return value, false
