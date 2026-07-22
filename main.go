@@ -360,8 +360,6 @@ func (r *Rewriter) rewriteTagAttributes(
                     index++
             }
 
-            attributeName := tag[attributeStart:index]
-
             if index == attributeStart {
                     index++
                     continue
@@ -416,7 +414,6 @@ func (r *Rewriter) rewriteTagAttributes(
 
             value := tag[valueStart:valueEnd]
             newValue, valueChanged := r.rewriteAttributeValue(
-                    attributeName,
                     value,
                     rewriteContext,
             )
@@ -448,7 +445,6 @@ func isMarkupSpace(value byte) bool {
 }
 
 func (r *Rewriter) rewriteAttributeValue(
-    attributeName string,
     value string,
     rewriteContext RewriteContext,
 ) (string, bool) {
@@ -461,13 +457,16 @@ func (r *Rewriter) rewriteAttributeValue(
     }
 
     prefix := value[:prefixEnd]
-    if !r.isAttributePath(prefix, rewriteContext) &&
-            !isURLAttribute(attributeName) {
+    normalized, ok := r.normalizeAttributePath(
+            prefix,
+            rewriteContext,
+    )
+    if !ok {
             return value, false
     }
 
     rewritten, changed := r.rewriteURL(
-            prefix,
+            normalized,
             rewriteContext,
     )
     if !changed {
@@ -477,103 +476,69 @@ func (r *Rewriter) rewriteAttributeValue(
     return rewritten + value[prefixEnd:], true
 }
 
-func isURLAttribute(attributeName string) bool {
-    attributeName = strings.ToLower(attributeName)
-
-    switch attributeName {
-    case "action",
-            "archive",
-            "background",
-            "cite",
-            "classid",
-            "codebase",
-            "data",
-            "formaction",
-            "href",
-            "icon",
-            "longdesc",
-            "manifest",
-            "ping",
-            "poster",
-            "profile",
-            "src",
-            "srcset",
-            "usemap":
-            return true
-    }
-
-    for _, suffix := range []string{
-            "-action",
-            "-href",
-            "-path",
-            "-src",
-            "-uri",
-            "-url",
-            ":href",
-    } {
-            if strings.HasSuffix(attributeName, suffix) {
-                    return true
-            }
-    }
-
-    return false
-}
-
-func (r *Rewriter) isAttributePath(
+func (r *Rewriter) normalizeAttributePath(
     value string,
     rewriteContext RewriteContext,
-) bool {
+) (string, bool) {
     if value == "" ||
             strings.HasPrefix(value, r.proxyPrefix) ||
             strings.HasPrefix(value, "#") ||
             strings.HasPrefix(value, "?") {
-            return false
+            return value, false
+    }
+
+    if hasRequestHostPathPrefix(
+            value,
+            rewriteContext.Host,
+    ) {
+            return rewriteContext.BaseURL.Scheme +
+                    "://" +
+                    value, true
     }
 
     parsed, err := url.Parse(value)
     if err != nil {
-            return false
+            return value, false
     }
 
     if parsed.IsAbs() {
-            return isHTTPURL(parsed) &&
-                    sameRequestHost(parsed.Host, rewriteContext.Host)
+            if isHTTPURL(parsed) &&
+                    sameRequestHost(
+                            parsed.Host,
+                            rewriteContext.Host,
+                    ) {
+                    return value, true
+            }
+
+            return value, false
     }
 
     if parsed.Host != "" {
-            return sameRequestHost(parsed.Host, rewriteContext.Host)
+            if sameRequestHost(
+                    parsed.Host,
+                    rewriteContext.Host,
+            ) {
+                    return value, true
+            }
+
+            return value, false
     }
 
-    return strings.HasPrefix(value, "/") ||
+    if strings.HasPrefix(value, "/") ||
             strings.HasPrefix(value, "./") ||
-            strings.HasPrefix(value, "../") ||
-            hasPlainRelativePathPrefix(value)
+            strings.HasPrefix(value, "../") {
+            return value, true
+    }
+
+    return value, false
 }
 
-func hasPlainRelativePathPrefix(value string) bool {
-    slashIndex := strings.IndexByte(value, '/')
-    if slashIndex <= 0 {
+func hasRequestHostPathPrefix(value string, host string) bool {
+    if len(value) <= len(host) || value[len(host)] != '/' {
             return false
     }
 
-    for index := 0; index < slashIndex; index++ {
-            current := value[index]
-            if current >= 'a' && current <= 'z' ||
-                    current >= 'A' && current <= 'Z' ||
-                    current >= '0' && current <= '9' ||
-                    current >= 0x80 {
-                    continue
-            }
-
-            switch current {
-            case '-', '_', '.', '~', '%', '@':
-                    continue
-            default:
-                    return false
-            }
-    }
-
-    return true
+    return strings.EqualFold(value[:len(host)], host)
 }
 
 func isHTTPURL(value *url.URL) bool {
